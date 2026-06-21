@@ -1,0 +1,249 @@
+# Machine Learning Systems
+## Article 4: Training Data — Sampling, Labeling, and the Hidden Traps That Ruin Models
+
+*This is the fourth article in the **Machine Learning Systems** series, based on "Designing Machine Learning Systems" by Chip Huyen. Article 3 covered the data infrastructure that moves and stores data. This article covers what happens next: turning raw data into a training set your model can actually learn from.*
+
+---
+
+Here's an uncomfortable truth that most ML courses skip: **you almost never train on all your data.**
+
+You don't have access to every transaction your company has ever processed. You can't afford to compute features over your entire 10-year log history for every experiment. And even if you could, most of that data has no label attached to it — nobody told you which transactions were fraudulent, which emails were spam, or which images contain a cat.
+
+This article covers the two foundational problems every ML engineer faces before a model ever sees data: **how do you choose which data to use (sampling)**, and **how do you get labels for it?** We'll then cover two problems that emerge once you have a training set: **class imbalance** and the techniques used to fix it, and **data augmentation** — manufacturing more training signal from what you already have.
+
+---
+
+## Sampling: Choosing What the Model Sees
+
+Sampling is the process of selecting a subset of data from a larger population. You sample for two main reasons: you simply don't have access to the entire real-world population (you can't observe every possible transaction that *could* happen), or you have the data but processing all of it is too slow or expensive.
+
+How you sample directly shapes what your model learns. A poorly chosen sample teaches your model a distorted view of reality — and this distortion is often invisible until the model is in production making bad predictions on exactly the cases your sample underrepresented.
+
+### Nonprobability Sampling
+
+In nonprobability sampling, data is selected by some criterion *other than* probability — meaning some data points have no real chance of being selected at all, while others are heavily overrepresented. This almost always introduces selection bias.
+
+Common methods, and why engineers fall into them:
+
+- **Convenience sampling:** Using whatever data is easiest to get. You scrape the first 100,000 reviews you can access via an API, rather than a representative sample of all reviews ever written.
+- **Snowball sampling:** Starting with a small set and expanding via referrals — e.g., starting with known bot accounts and finding more by looking at who they interact with. Useful for finding rare, hard-to-locate examples, but the resulting sample reflects the structure of that referral network, not the real population.
+- **Judgment sampling:** An expert decides what should be included. A radiologist selects which X-rays go into a training set based on what they consider "representative" cases — but their judgment encodes their own biases about what's typical.
+- **Quota sampling:** Selecting a fixed number of samples from predefined groups (e.g., "200 reviews from each star rating") without proper randomization within each group.
+
+**Why this matters:** Nonprobability sampling is everywhere in real ML projects, usually unintentionally. If you train a content moderation model using the reports that users flagged, you're not getting a representative sample of harmful content — you're getting a sample of content that someone found annoying enough to report, which systematically underrepresents harmful content that's subtle or that affects groups less likely to use the report button. **This is the most common, least discussed source of bias in production ML systems** — not the algorithm, but the sampling method used to construct the training set in the first place.
+
+### Simple Random Sampling
+
+Every item in the population has an equal probability of being selected — the classic "draw names from a hat" approach.
+
+**Strength:** Easy to implement, unbiased by design.
+
+**Weakness:** If a category is rare, simple random sampling can simply miss it entirely, or include so few examples that the model can't learn anything useful about it. If only 0.1% of your transactions are fraudulent, a random 1% sample of your data might contain only a handful of fraud examples — nowhere near enough to learn the pattern.
+
+### Stratified Sampling
+
+To fix the "rare category" problem, you divide the population into groups (**strata**) based on some characteristic, and sample from each stratum separately — guaranteeing that even rare categories show up in your final sample in sufficient numbers.
+
+**Example:** When building a churn prediction model, you might stratify customers by subscription tier (free, basic, premium, enterprise). If enterprise customers make up only 2% of your user base but represent your most valuable churn risk, simple random sampling might give you almost no enterprise examples. Stratified sampling ensures you deliberately sample enough from each tier to learn meaningful patterns within each.
+
+**Practical takeaway:** Stratified sampling is one of the most underused techniques by engineers coming from academic backgrounds, because benchmark datasets are usually already balanced. In production, where the real world is wildly imbalanced, stratifying by your most important rare categories (fraud, churn, defect, disease) is often the single highest-leverage thing you can do before training.
+
+### Weighted Sampling
+
+Instead of dividing into groups, you assign each individual sample a probability of being selected, based on some criterion you care about.
+
+**Example:** You might weight more recent data higher than older data, because recent transactions better reflect current fraud patterns than transactions from three years ago. Or you might upweight samples from a region where you're about to launch a new product, even though you have less historical data from that region, because you specifically need the model to perform well there.
+
+This is a way of injecting domain expertise directly into your data pipeline — you, the engineer, are telling the sampling process "this subset matters more for what we're trying to achieve," even if it doesn't reflect the raw frequency in the real world.
+
+### Reservoir Sampling
+
+This solves a specific, tricky problem: how do you take a random sample from a **stream** of data when you don't know in advance how many items the stream will contain?
+
+This is common with live data — log streams, real-time event feeds — where you can't just "look at the whole population" because the population is still arriving and may be unbounded.
+
+**How it works conceptually:** You maintain a fixed-size "reservoir." As each new item arrives, you decide whether to include it in the reservoir (possibly replacing an existing item) based on a probability calculated from how many items you've seen so far. The elegant guarantee is that at any point in the stream, every item that has arrived so far has had an equal probability of ending up in the final reservoir — without ever needing to know the total stream length in advance.
+
+**Example:** A platform wants to maintain a random sample of 10,000 representative user sessions out of a continuously growing stream of millions of sessions per day, for ongoing model monitoring. Reservoir sampling lets you maintain that sample incrementally, in real time, without storing every session ever seen.
+
+### Importance Sampling
+
+This technique lets you sample from a distribution you actually have access to (the **proposal distribution**) when the distribution you actually care about (the **target distribution**) is too expensive, too slow, or simply impossible to sample from directly — and then mathematically correct for the difference using weights.
+
+**Example:** Suppose you want to train a model on examples that are particularly difficult or rare in the real distribution — but directly observing enough of those rare cases would take years of data collection. Instead, you sample more heavily from an accessible related distribution (say, synthetic or adjacent examples) and apply importance weights to correct the resulting model so it behaves as if it had been trained on the true target distribution.
+
+This is a more advanced and less commonly hand-implemented technique day-to-day, but understanding it conceptually matters because it underlies several techniques used in reinforcement learning and off-policy evaluation — situations where you want to estimate "what would have happened under a different policy/model" using data collected under your *current* policy/model.
+
+---
+
+## Labeling: The Bottleneck Nobody Talks About Enough
+
+Most production models are trained with supervised learning, which means: **no labels, no model.** And in industry, getting good labels is frequently the single biggest bottleneck in shipping an ML system — bigger than model architecture, bigger than compute.
+
+### Hand Labels
+
+The default approach: humans look at examples and assign labels. Radiologists label tumors in scans. Annotators mark whether a tweet is toxic. Linguists translate sentences for a translation dataset.
+
+**The real costs of hand labeling, beyond the obvious:**
+
+- **Expense and slowness:** High-quality labeling, especially requiring domain expertise (medical, legal), can cost dollars per label and take weeks to complete at scale.
+- **Privacy risk:** Sending sensitive data (medical records, financial data, private messages) to third-party annotators creates serious privacy and compliance exposure. Many companies build internal labeling teams specifically to avoid this.
+- **Label multiplicity:** Different annotators often disagree. Is this tweet "toxic" or "edgy"? Is this tumor "malignant" or "indeterminate"? When you have multiple annotators labeling the same data (which you should, for quality control), you need a strategy for resolving disagreement — majority vote, expert adjudication, or keeping multiple labels and modeling the disagreement itself.
+- **Data lineage:** This is something junior engineers consistently underestimate. When your model's performance suddenly drops, one of the first things you need to check is: *did something change about how the data was labeled?* Did you switch labeling vendors? Did the labeling guidelines change? Did a new batch of annotators interpret the instructions differently? Without careful **data lineage** tracking — knowing exactly which labeling process, guideline version, and annotator pool produced which labels — diagnosing this kind of drop becomes guesswork.
+
+**Practical example:** A sentiment classification model's accuracy on customer support tickets drops 8% after a model refresh. After two weeks of debugging the model code, the team discovers the real cause: the labeling vendor was switched three months ago, and the new vendor's annotators were instructed to label "neutral but slightly frustrated" tickets differently than the old vendor did. The model didn't get worse — the definition of the label silently shifted underneath it.
+
+### Natural Labels
+
+Sometimes you don't need humans at all — the system itself generates ground truth as a side effect of normal operation.
+
+**Example:** In a recommendation system, if a user clicks on a recommended item, that's a natural positive label. If they scroll past it without clicking, that's a natural (weaker) negative signal. In a fraud system, when a customer disputes a charge and it's confirmed fraudulent, that dispute *is* the label — no human annotator needed.
+
+**The critical concept: feedback loop length.** Natural labels are only as useful as how quickly they arrive.
+
+- **Short feedback loop:** Ad click prediction — you know within seconds to minutes whether a user clicked.
+- **Long feedback loop:** Fraud detection via chargebacks — a fraudulent transaction might not be confirmed as fraud until 30–60 days later when the customer disputes it. Loan default prediction might have a feedback loop measured in years.
+
+A long feedback loop means your model is always training on stale ground truth, and you can't quickly tell if a new model version is actually working better — you have to wait out the loop. This has real engineering consequences: it shapes how often you can responsibly retrain, and it means your most recent data is the data you're least certain about (the labels haven't "matured" yet).
+
+### Weak Supervision
+
+Instead of hand-labeling, you write **labeling functions** — heuristics, rules, or even other models that programmatically assign (noisy) labels to your data at scale.
+
+**Example:** Rather than having a human read 500,000 support tickets to label them as "billing issue," "technical issue," or "general inquiry," you write a set of heuristic functions: *"if the ticket contains 'charge', 'refund', or 'invoice', label it billing"*, *"if the ticket contains 'error', 'crash', or 'not working', label it technical."* These rules will be imperfect and will conflict with each other sometimes, but a weak supervision framework (like Snorkel, a well-known open-source tool built around this idea) combines multiple noisy labeling functions into a single probabilistic label, weighting each function by its estimated reliability.
+
+**Why this matters:** Weak supervision trades label *quality* for label *quantity and speed*. It's especially valuable in domains where hand-labeling is prohibitively expensive (legal documents, medical text) but where domain experts can articulate useful heuristics, even imperfect ones, much faster than they can label individual examples one by one.
+
+### Semi-Supervision
+
+This approach starts with a small set of genuine hand-labels and extends them using structural assumptions about the data — most commonly, the assumption that **similar data points share the same label.**
+
+**Example technique (self-training):** Train an initial model on your small labeled set. Use that model to predict labels on your large unlabeled set. Take the predictions the model is most confident about, treat them as if they were true labels, add them to your training set, and retrain. Repeat. The model effectively bootstraps its own labeled dataset, expanding outward from the small labeled seed.
+
+**Caution:** This works well when the underlying assumption holds (similar examples really do share labels) but can compound errors if the initial model has systematic blind spots — it will confidently mislabel an entire region of similar examples and then train on its own mistakes.
+
+### Transfer Learning
+
+Rather than starting from labels at all, you start from a model that was already trained on a different, data-abundant task, and adapt it to your task — usually with far fewer labels than training from scratch would require.
+
+**Example:** A model originally trained on ImageNet (millions of labeled general images) can be **fine-tuned** on just a few thousand labeled X-ray images to perform medical image classification — because the model has already learned general visual features (edges, textures, shapes) that transfer to the new, more specialized domain. Similarly, large language models pretrained on huge amounts of unlabeled text are fine-tuned on small, task-specific labeled datasets for things like sentiment analysis or document classification.
+
+**Why this matters for production teams:** Transfer learning is, in practice, the single biggest lever for reducing the labeling bottleneck in modern ML systems. Most teams today don't train models from scratch — they fine-tune a pretrained base model, which means the labeling problem shrinks from "we need 500,000 labels" to "we need 5,000 labels."
+
+### Active Learning
+
+Instead of labeling data randomly or labeling everything, active learning flips the question: **which specific unlabeled examples, if labeled, would teach the model the most?**
+
+The most common strategy is **uncertainty sampling**: run your current model over your unlabeled pool, find the examples where the model is least confident (predictions closest to 50/50 for binary classification, or with high entropy across classes), and send *those specific examples* to human annotators first.
+
+**Example:** In a content moderation system, instead of randomly sampling posts for human review, you prioritize posts where the model's confidence is near the decision boundary — clearly toxic content and clearly benign content aren't sent to expensive human reviewers, because the model already handles those well. The ambiguous, borderline cases — where human judgment adds the most value — get prioritized.
+
+**Why this matters:** Active learning dramatically improves labeling efficiency. Multiple published studies on active learning have found that strategically selected smaller labeled sets can match the performance of much larger randomly labeled sets — meaning teams can hit the same model quality with a fraction of the labeling budget. For any team where labeling cost is a real constraint (which is most teams), an active learning loop is one of the highest-leverage pieces of pipeline infrastructure to build.
+
+---
+
+## Class Imbalance: When Reality Isn't Balanced
+
+Class imbalance occurs when one class vastly outnumbers another in your training data — and in production ML, this isn't an edge case, it's closer to the default state of the world. Fraud is rare. Disease is rare. Equipment failure is rare. Churn, in any given month, is rare. The events you most care about predicting are often the least frequent.
+
+**Why imbalance is a real problem, not just an inconvenience:** A model trained on data that's 99.9% "no fraud" can achieve 99.9% accuracy by simply always predicting "no fraud" — learning nothing useful at all. The model receives an overwhelming gradient signal pushing it toward the majority class and can find this trivial, useless shortcut instead of learning the actual distinguishing patterns of the minority class.
+
+### Evaluation Metrics: Stop Trusting Accuracy
+
+This is one of the first lessons every ML engineer learns the hard way. **Accuracy is a dangerously misleading metric on imbalanced data.** A model that always predicts "not fraud" on a 99.9%-legitimate dataset gets 99.9% accuracy while being completely useless.
+
+Instead, use metrics that account for the asymmetry between classes:
+
+- **Precision:** Of everything the model flagged as fraud, how much was actually fraud? Important when false positives are costly (e.g., blocking legitimate customer transactions).
+- **Recall:** Of all the actual fraud cases, how many did the model catch? Important when false negatives are costly (e.g., missing real fraud).
+- **F1 score:** The harmonic mean of precision and recall — useful when you need a single number balancing both concerns.
+- **ROC curve / AUC:** Shows the tradeoff between true positive rate and false positive rate across different decision thresholds, useful for understanding overall model discriminative power independent of any single threshold choice.
+
+**Practical takeaway:** The right metric depends entirely on the business cost of different error types. A fraud team might prioritize recall (catch as much fraud as possible, tolerate some false alarms). A loan approval team might prioritize precision (don't wrongly reject creditworthy applicants, even if it means missing some risky ones). This decision should be made jointly with business stakeholders, not unilaterally by the engineer — tying back to the metric-objective alignment discussion from Article 2.
+
+### Data-Level Methods: Resampling
+
+These techniques change the training data distribution directly, rather than changing the model.
+
+- **Undersampling:** Remove examples from the majority class so the classes are more balanced. Simple, but you're throwing away potentially useful data, and with severe imbalance (99.9% vs 0.1%) you'd need to discard the vast majority of your dataset to fully balance it.
+- **Oversampling:** Duplicate or generate new examples of the minority class. Simple duplication risks overfitting to the specific minority examples you have.
+- **Tomek links:** A more refined undersampling technique that identifies pairs of very close majority/minority examples near the decision boundary and removes the majority example from each pair — cleaning up ambiguous boundary regions rather than randomly discarding data.
+- **SMOTE (Synthetic Minority Oversampling Technique):** Instead of duplicating existing minority examples, SMOTE generates *new*, synthetic minority examples by interpolating between existing minority examples and their nearest minority neighbors. This gives the model more varied minority-class examples to learn from rather than exact duplicates, reducing overfitting risk compared to naive oversampling.
+
+**Practical takeaway:** Resampling is applied to the *training* set only — never to your validation or test sets, which must reflect the real-world distribution your model will actually face in production. A common mistake is resampling before splitting into train/validation/test, which leaks synthetic or duplicated examples across the splits and produces misleadingly optimistic evaluation numbers.
+
+### Algorithm-Level Methods: Changing How the Model Learns
+
+Instead of touching the data, you can change how the learning algorithm weighs errors on different classes.
+
+- **Cost-sensitive learning:** Assign a higher penalty (cost) to misclassifying the minority class in the loss function. Missing a fraud case might be assigned 50x the cost of a false alarm, directly reflecting real-world business cost in the optimization objective.
+- **Class-balanced loss:** Reweights the loss function based on the inverse frequency of each class, so the rare class contributes proportionally more to the total gradient signal during training, counteracting its numerical underrepresentation.
+- **Focal loss:** Originally developed for object detection (where background "no object" regions vastly outnumber actual objects in an image), focal loss down-weights the contribution of *easy, already-well-classified* examples and focuses the model's learning effort on *hard, currently-misclassified* examples — which are disproportionately likely to be minority-class examples.
+
+**Practical takeaway:** Algorithm-level methods are often preferred over resampling in production because they don't distort the underlying data distribution or risk leaking information across splits — they change the optimization objective rather than the data itself, which tends to be a cleaner, more maintainable solution.
+
+---
+
+## Data Augmentation: Manufacturing More Signal
+
+Data augmentation creates additional training examples from the data you already have, without needing to collect or label anything new. It's especially valuable when labels are expensive (tying back to the labeling section) or when you need your model to be more robust to real-world variation it will encounter in production.
+
+### Simple Label-Preserving Transformations
+
+You modify an example in a way that obviously doesn't change its true label, and add the modified version to your training set.
+
+**Examples:**
+- **Computer vision:** Randomly flipping an image horizontally, rotating it slightly, adjusting brightness/contrast, or cropping it — a flipped photo of a cat is still a photo of a cat.
+- **NLP:** Replacing a word with a synonym ("the movie was great" → "the movie was excellent"), or back-translation (translating a sentence to another language and back to introduce natural paraphrasing while preserving meaning).
+
+**Why this matters:** These transformations teach the model that the label shouldn't change under irrelevant variations — making it more robust to the natural variation it will see in production (photos taken at different angles, reviews phrased differently than anything in the training set).
+
+### Perturbation
+
+You add small amounts of noise to an example — small enough that a human wouldn't notice or change their judgment, but potentially large enough to fool a poorly-regularized model.
+
+**Why this matters beyond just "more data":** Perturbation is specifically used to probe and strengthen a model's decision boundary. If a tiny, imperceptible change to an image causes the model's prediction to flip entirely, that reveals the model has learned a brittle, non-robust decision boundary near that example. Deliberately training on perturbed examples (a technique closely related to **adversarial training**) hardens the model against both natural noise and deliberate adversarial attacks — which matters enormously in security-sensitive applications like fraud detection, spam filtering, or any system an adversary has an incentive to fool.
+
+### Data Synthesis
+
+Rather than modifying existing examples, you create entirely new ones.
+
+**Examples:**
+- **NLP:** Using templates to generate synthetic training queries. For a voice assistant, you might generate thousands of variations from a template like *"What's the weather in [CITY] [TIME_PERIOD]?"* by substituting in different cities and time periods, rapidly producing large amounts of realistic, labeled training data for an intent classification model.
+- **Computer vision — Mixup:** Combine two existing training images (and their labels) by blending them together at the pixel level in some proportion, with the label also becoming a proportional blend of the two original labels. This forces the model to behave more linearly between classes and has been shown empirically to improve generalization and robustness, particularly for models with millions of parameters relative to the available data.
+
+**Practical takeaway:** Data synthesis is most valuable exactly where hand-labeling is most expensive and natural labels are scarcest — early-stage products, new product categories, or rare-event detection — because it lets you bootstrap a usable training set before you have enough real-world traffic to generate natural labels or before you can justify a large hand-labeling budget.
+
+---
+
+## Putting It Together: Building a Training Set for a Fraud Model
+
+Here's how the concepts in this article come together in a realistic project:
+
+1. **Sampling:** You can't train on all 2 billion historical transactions — too expensive to process. You use **stratified sampling** to ensure fraud cases (0.1% of all transactions) are well-represented relative to a random sample, and **weighted sampling** to upweight recent transactions, since fraud patterns evolve.
+2. **Labeling:** Most labels come from **natural labels** — confirmed chargebacks — but these have a 45-day **feedback loop**, meaning your most recent month of data is essentially unlabeled. You supplement with **weak supervision** rules (heuristics like "transaction from a new device + new shipping address + high value" flagged for expedited human review) to get faster, if noisier, signal on recent transactions.
+3. **Class imbalance:** Even after stratified sampling, fraud is still a small minority class. You apply **SMOTE** to generate synthetic minority examples for training, and switch your evaluation metric from accuracy to **precision-recall curves**, since the business cares specifically about the tradeoff between catching fraud and inconveniencing legitimate customers.
+4. **Data augmentation:** For a related text-based scam-detection model (analyzing messages between buyers and sellers), you use **synonym replacement** and **back-translation** to expand your limited set of hand-labeled scam messages, since hand-labeling scam conversations requires trained reviewers and is slow to scale.
+
+Notice that no single technique solved the problem. Production training sets are usually built from a *combination* of these approaches, layered to address different weaknesses in the available data.
+
+---
+
+## Key Takeaways
+
+- Sampling method shapes what your model learns more than people realize — nonprobability sampling silently introduces bias, while stratified and weighted sampling let you deliberately correct for rare but important categories.
+- Labeling is frequently the real bottleneck in shipping ML systems. Natural labels are cheap but bounded by feedback loop length; hand labels are expensive and introduce lineage and consistency risks; weak supervision, transfer learning, and active learning are the main levers for reducing labeling cost without sacrificing too much quality.
+- Class imbalance is the default state of most real-world prediction problems, not an exception. Accuracy is the wrong metric to trust; use precision, recall, F1, or AUC, and choose based on the real business cost of false positives vs. false negatives.
+- Resampling (data-level) and reweighting the loss function (algorithm-level) are the two main families of techniques for handling imbalance — apply resampling only to training data, never to validation/test sets.
+- Data augmentation — label-preserving transformations, perturbation, and synthesis — manufactures additional training signal and robustness from data you already have, and is especially valuable when labels are scarce or expensive.
+
+---
+
+## What's Next
+
+In Article 5, we move from training data to **feature engineering** — how raw data gets transformed into the actual inputs a model consumes, common feature engineering techniques, the problem of data leakage during feature creation, and how production teams manage features consistently across training and serving.
+
+---
+
+*Machine Learning Systems Series | Article 4 of N*
+*Based on "Designing Machine Learning Systems" by Chip Huyen (O'Reilly, 2022)*

@@ -1,0 +1,220 @@
+# Machine Learning Systems
+## Article 7: Deployment — Where the Model Meets Reality
+
+*This is the seventh article in the **Machine Learning Systems** series, based on "Designing Machine Learning Systems" by Chip Huyen. Article 6 covered how models are developed and rigorously evaluated offline. This article covers the moment that offline work has all been building toward: getting the model in front of real users, reliably, at speed, and at scale.*
+
+---
+
+There's a particular moment familiar to every ML engineer who's shipped something real: the model performs beautifully offline, the team is excited, and then someone asks the question that changes everything — *"okay, how do we actually serve this to 10 million users with 50-millisecond latency?"*
+
+This is where a huge number of promising models quietly die — not because they weren't accurate, but because nobody thought through how they'd actually run in production. This article covers the myths that trip up newcomers to deployment, the fundamental choice between batch and online prediction, how to shrink models that are too slow or too large, and what changes when computation moves from the cloud to the edge.
+
+---
+
+## Machine Learning Deployment Myths
+
+Before getting into the mechanics, it's worth directly confronting a few assumptions that almost everyone holds before they've actually deployed a model. Each one is wrong in a way that has real engineering consequences.
+
+### Myth 1: "You only deploy one or two ML models at a time."
+
+People picture a single model serving a single prediction. In reality, even a single user-facing feature is usually powered by *many* models working together.
+
+**Example:** When you open a ride-sharing app, a single screen might simultaneously rely on a demand prediction model (how many ride requests will there be in this area in the next 10 minutes), a driver availability model, an ETA prediction model, a dynamic pricing model, and a fraud detection model running on the payment — five or more distinct models, each independently trained, versioned, monitored, and maintained, all feeding into what feels like one simple screen to the end user.
+
+**Why this matters for engineering:** This isn't just a fun fact — it has direct infrastructure implications. You can't design a deployment system for "one model." You need infrastructure that can handle dozens, hundreds, or (at large companies) thousands of models, each with its own update schedule, monitoring dashboard, and rollback plan. This is precisely the scalability requirement discussed in Article 2 — "growth in model count" — showing up concretely at deployment time.
+
+### Myth 2: "Model performance remains the same if you do nothing."
+
+A traditional software feature, once shipped and working, generally keeps working until someone changes the code. ML models don't get this luxury.
+
+Two separate forces erode model performance over time, even if you never touch the code:
+
+- **Software rot:** The world around the model changes — upstream APIs change their response format, a dependency gets upgraded, a feature pipeline silently breaks. None of this is the model's "fault," but it degrades the model's effective performance in production.
+- **Data distribution shift:** As discussed throughout this series (Articles 1, 3, and 5), the real-world data the model encounters in production drifts away from the data it was trained on — user behavior changes, new fraud patterns emerge, a pandemic reshapes purchasing habits overnight.
+
+**Practical takeaway:** A model that isn't actively monitored isn't a model that's "stable" — it's a model that's quietly decaying, and you simply don't know by how much yet.
+
+### Myth 3: "You won't need to update models frequently."
+
+Newcomers often assume a model gets trained once, deployed, and revisited maybe once a year. In reality, update frequency is itself a strategic engineering decision, and for many production systems, it's far more frequent than people expect.
+
+**Example:** Some companies retrain and redeploy certain models — particularly in domains like ad bidding, fraud detection, or trending content ranking, where the underlying patterns shift extremely fast — on cycles as short as every 10 minutes. This isn't an exotic edge case; it's standard practice in domains where being even an hour stale measurably costs money or lets fraud through.
+
+**Practical takeaway:** The right update frequency depends entirely on how fast the underlying data distribution actually shifts for your specific problem (tying back to the "adaptability" requirement from Article 2). The honest engineering answer to "how often should we retrain?" is almost always "as fast as we can do so safely and reliably" — not an arbitrary fixed schedule chosen for convenience.
+
+### Myth 4: "Scale is not an ML engineer's concern."
+
+Some newcomers assume that scalability is purely a backend/infrastructure team's problem, and the ML engineer's job ends once a model performs well in a notebook. This is a dangerous assumption.
+
+**Reality check:** The majority of practicing ML engineers work at companies with more than 100 employees, where any application they build needs to handle real, often large-scale traffic from day one. A model that takes 3 seconds to generate a prediction might be perfectly fine in an offline evaluation script and completely unusable for a consumer-facing app expecting sub-100ms responses serving thousands of requests per second.
+
+**Practical takeaway:** Scalability isn't handed off to someone else after the model is "done" — it needs to be a design consideration from early in model development, directly shaping decisions about model architecture, complexity, and the trade-offs discussed in Article 6.
+
+---
+
+## Batch Prediction vs. Online Prediction
+
+One of the most consequential architectural decisions in deployment is *when* predictions get computed: as requests come in, or ahead of time, in bulk.
+
+### Online Prediction (Synchronous)
+
+The model generates a prediction the moment a request arrives, and the requesting system waits (synchronously) for the response before proceeding.
+
+**When this is necessary:** Whenever the input can't be known in advance, or the use case fundamentally requires a fresh, real-time response.
+
+**Example:** Fraud detection at the moment of a credit card swipe. You cannot precompute "is this transaction fraudulent?" ahead of time, because the transaction — its amount, merchant, location, timing — doesn't exist until the exact moment it happens. The model must score it the instant the request comes in, typically within a strict latency budget (often under 100 milliseconds), because the checkout flow is waiting on that response before it can proceed.
+
+**The engineering challenge:** Online prediction demands tightly bounded latency, high availability (the serving system genuinely cannot go down without breaking the user-facing product), and infrastructure capable of scaling to handle unpredictable, bursty traffic in real time. This connects directly back to the synchronous request-driven communication pattern (REST/RPC) discussed in Article 3.
+
+### Batch Prediction (Asynchronous)
+
+Predictions are generated ahead of time, on a recurring schedule, for a known, bounded set of inputs — and the results are stored somewhere (typically a database or cache) for fast retrieval whenever a user actually needs them.
+
+**When this works well:** Whenever the set of things you need predictions for is knowable in advance, and a small amount of staleness is acceptable.
+
+**Example:** A movie recommendation system doesn't need to compute fresh, real-time recommendations the instant a user opens the app. Instead, a batch job might run every night, computing personalized recommendations for every active user and storing the results. When a user opens the app the next morning, the system simply performs a fast lookup of precomputed results — no model inference happens at request time at all.
+
+**Why this is attractive:** Batch prediction massively simplifies the serving-time engineering problem. There's no tight latency budget to hit at request time (the heavy computation already happened hours earlier), and you can use the full nightly batch processing infrastructure discussed in Article 3 (Spark, for example) rather than needing a low-latency, always-available serving system.
+
+**The real cost:** Staleness. The recommendations a user sees were computed based on their behavior as of last night — if their preferences or context shift dramatically during the day (they just bought a gift for a child, their taste shifted after a major life event), the system won't reflect that until the next batch run.
+
+### Choosing Between Them — and the Hybrid Reality
+
+Many production systems don't pick one exclusively — they blend both, using batch prediction for the bulk of cheap, less time-sensitive predictions, and online prediction only where true real-time freshness genuinely matters.
+
+**Example:** An e-commerce recommendation system might use batch-computed recommendations as the baseline "you might also like" section, while layering a real-time, online-computed re-ranking on top that incorporates what the user has clicked or viewed in just the last few minutes of their current session — combining the efficiency of batch with the freshness of online exactly where it adds the most value.
+
+### Unifying Batch and Streaming Pipelines
+
+A subtle but serious production problem emerges when a company maintains two completely separate code paths: a batch pipeline (used to compute features for *training*, often in a tool like Spark) and a separate streaming pipeline (used to compute features for real-time *serving*, often in a different tool or language entirely).
+
+**Why this is dangerous:** This is precisely the training-serving skew problem introduced in Article 3. If the batch feature pipeline and the streaming feature pipeline implement the "same" feature even slightly differently — different rounding behavior, a subtly different time window definition, a different handling of missing data — the model ends up being trained on one version of reality and served on a quietly different one, and this mismatch is often invisible until production performance mysteriously degrades.
+
+**The increasingly common fix:** Companies are moving toward unifying these pipelines using a single stream processing framework — **Apache Flink** is the most commonly cited example — capable of handling both the batch case (by treating a fixed historical dataset as a "bounded stream") and the real-time streaming case within the same underlying processing engine and the same feature-computation code. This guarantees, by construction, that training and serving compute features identically, rather than relying on two separate teams maintaining two separate implementations and hoping they stay in sync.
+
+**Practical takeaway:** If you're building feature pipelines for a system that needs both batch-trained models and real-time serving, treat pipeline unification as a serious design goal from the start — retrofitting it after training-serving skew has already caused a production incident is far more painful than designing for it upfront.
+
+---
+
+## Model Compression: Making Models Fast and Small Enough to Ship
+
+Sometimes a model that performs beautifully offline is simply too slow or too large to deploy as-is — particularly for online prediction with strict latency budgets, or for deployment to resource-constrained devices. Model compression techniques shrink and speed up a model, usually trading away a small amount of accuracy for substantial gains in speed, size, or both.
+
+### Low-Rank Factorization
+
+Many of the large weight matrices (tensors) inside a neural network can be approximated by the product of two or more much smaller matrices — replacing a single large, high-dimensional tensor with a combination of lower-dimensional ones that approximate its behavior using far fewer total parameters.
+
+**Why it works:** In practice, the weight matrices learned by neural networks are often far less "complex" than their raw dimensions suggest — much of the useful information they encode can be captured by a much lower-rank approximation, without losing much predictive performance, while substantially reducing the total parameter count and the resulting computation needed at inference time.
+
+### Knowledge Distillation
+
+Train a smaller, faster **student** model to mimic the behavior of a larger, more accurate **teacher** model (or even an entire ensemble of teacher models, connecting back to the ensembling techniques from Article 6).
+
+**How it works:** Rather than training the small student model directly on the original hard labels alone, it's trained to match the teacher's output probability distributions (which carry richer information — for example, the teacher might output "80% cat, 15% dog, 5% other," not just the single hard label "cat"). This richer training signal often lets the smaller student model achieve much better performance than it could have achieved if trained from scratch directly on the original labeled data alone.
+
+**Example:** DistilBERT is a well-known example in NLP — a much smaller version of the BERT language model, trained via knowledge distillation from the full-size BERT model, achieving a large fraction of the original model's performance while being significantly faster and smaller, making it practical to deploy in latency-sensitive production settings where the full-size model would be too slow.
+
+### Pruning
+
+Identify and remove the parameters (or, more aggressively, entire nodes or layers) of a trained network that contribute the least to its predictions, setting their values to zero or removing them entirely — making the resulting network significantly **sparser**.
+
+**Why it works:** Trained neural networks are often substantially over-parameterized — many individual weights end up contributing very little to the final predictions, and can be removed with minimal impact on accuracy, while meaningfully reducing the model's memory footprint and, with the right hardware/software support for sparse computation, its inference speed as well.
+
+**Practical nuance:** The accuracy impact of pruning needs to be carefully validated using the same rigorous offline evaluation toolkit from Article 6 — not just checking overall accuracy, but specifically checking whether pruning has disproportionately hurt performance on smaller, important slices of the data, since aggressive pruning can sometimes quietly degrade performance on rare but important subgroups even while overall accuracy looks barely affected.
+
+### Quantization
+
+Reduce the numeric precision used to represent the model's parameters — for example, switching from standard 32-bit floating-point numbers down to 16-bit floats, or even 8-bit integers.
+
+**Why it works so well in practice:** This is often the single highest-leverage, lowest-effort compression technique available. Reducing from 32-bit to 8-bit representations can shrink a model's memory footprint by roughly 4x, while also meaningfully speeding up computation, since many hardware platforms can perform operations on lower-precision numbers significantly faster than on full 32-bit floats. The accuracy cost is frequently surprisingly small, because neural networks tend to be fairly robust to the small amount of numeric precision lost in the conversion.
+
+**Practical takeaway:** Quantization is frequently the first compression technique engineers reach for, specifically because it's relatively simple to apply (often available as close to a single function call in modern ML frameworks) relative to its substantial payoff in latency and memory savings — making it a strong default starting point before investing in more involved techniques like distillation or architecture-level pruning.
+
+---
+
+## ML on the Cloud and on the Edge
+
+Where the actual computation happens — a centralized cloud server, or directly on the user's own device — is a fundamental deployment decision with major downstream consequences.
+
+### Cloud vs. Edge
+
+**Cloud computing** means the model runs on centralized servers (your own infrastructure, or a cloud provider's), and devices send requests over the network to get predictions back.
+
+**Advantages:** Easier to set up and manage — you control the hardware environment directly, can scale compute resources relatively elastically, and don't need to worry about the wildly varying hardware capabilities of millions of different end-user devices.
+
+**Disadvantages:**
+- **Network latency:** Every prediction requires a round trip over the network, which adds unavoidable delay — often the dominant source of latency in the entire request, larger than the actual model inference time itself, and becomes a serious problem in areas with poor or unreliable connectivity.
+- **Cost:** Serving millions of online predictions per day from cloud infrastructure incurs real, ongoing compute costs that scale directly and continuously with usage.
+- **Privacy:** Sending potentially sensitive user data (photos, voice recordings, health data, location) to a remote server for processing creates real privacy exposure and regulatory risk, and some users and regulatory environments (particularly in domains like healthcare) simply won't permit this kind of data leaving the device at all.
+
+**Edge computing** pushes the computation directly onto the user's own device — their phone, smartwatch, browser, or an embedded sensor — so predictions are generated locally, without a network round trip to a remote server.
+
+**Advantages:** Eliminates network latency entirely (since there's no round trip), can work fully offline, and keeps sensitive data on-device, directly addressing the privacy concern above.
+
+**Disadvantages:** The model must fit within the genuinely limited compute, memory, and battery constraints of the target device — this is precisely why model compression techniques (described above) are so often a *prerequisite* for edge deployment, not an optional optimization. A model that's perfectly fine running on a cloud server with abundant GPU memory may be entirely infeasible to run on a smartwatch with a tiny battery and limited RAM without first being substantially compressed.
+
+**Practical takeaway:** The cloud-vs-edge decision isn't purely a technical preference — it directly shapes model architecture choices from the very beginning of a project. A team that knows from day one that a model needs to run on a smartphone needs to be designing and validating for tight resource constraints throughout development, not bolting on compression as an afterthought right before deployment.
+
+### Compiling and Optimizing Models for Different Hardware
+
+Getting a model trained in a framework like PyTorch or TensorFlow to actually run efficiently on a specific piece of target hardware (a particular phone's chip, a specific edge device, a particular cloud GPU) requires a **compilation** step.
+
+**How it generally works:** The model, originally expressed in a high-level framework's representation, gets translated into an **Intermediate Representation (IR)** — a hardware-independent representation of the model's computation graph. From there, a compiler translates that IR into low-level, hardware-native machine code optimized for the specific target chip the model will actually run on. Tools like **Apache TVM** and **ONNX** exist specifically to handle this translation process, letting a model trained in one framework be deployed efficiently across a wide variety of different target hardware platforms without needing a completely separate, hand-written implementation for each one.
+
+**Why this matters for ML engineers, not just hardware specialists:** As ML increasingly moves toward edge and embedded deployment, understanding that "my model runs in PyTorch" and "my model runs efficiently on this specific chip" are two genuinely different engineering problems — connected by a real compilation step — becomes increasingly relevant, even for engineers who aren't hardware specialists themselves.
+
+### Local Optimization Techniques
+
+Once a model is being compiled for specific target hardware, several lower-level optimization techniques can be applied to make the resulting computation faster:
+
+- **Vectorization:** Performing an operation on an entire array or vector of values at once, rather than looping through and processing individual elements one at a time — taking advantage of hardware that's specifically built to perform these batched operations efficiently.
+- **Parallelization:** Splitting a computation into independent chunks that can run simultaneously across multiple processing cores, rather than sequentially on a single core.
+- **Loop tiling:** Restructuring how nested loops in the computation access memory, specifically to make better use of a processor's small, fast local memory caches and minimize slower trips out to main memory — a subtle but often impactful, hardware-specific optimization.
+- **Operator fusion:** Combining multiple separate, individual computational operations into a single, larger combined operation, reducing the overhead of repeatedly reading and writing intermediate results to memory between each individual step.
+
+**Practical takeaway:** Most ML engineers won't hand-implement these optimizations directly — they're typically applied automatically by the compilation tools described above. But understanding that they exist explains why the exact same trained model can run dramatically faster or slower depending on which compiler and hardware-specific optimization path it ends up going through, which matters when comparing deployment options or debugging an unexpectedly slow production serving system.
+
+### ML in Browsers: WebAssembly
+
+A particularly interesting and increasingly common edge deployment target is the web browser itself — running a model directly client-side, in JavaScript-adjacent code, rather than requiring a round trip to a server.
+
+**WebAssembly (WASM)** is a technology that allows code (often originally written in lower-level languages like C++ or Rust) to be compiled into a fast, portable, near-native-performance format that runs directly inside a web browser.
+
+**Why this matters specifically for ML deployment:** WASM allows a model to run efficiently inside essentially any modern browser, on essentially any underlying device and chip, without the deploying team needing to write or maintain separate, hardware-specific optimized code for every possible combination of device and chip a user might show up with. The browser itself, combined with WASM, effectively absorbs the hardware-compatibility problem.
+
+**Practical takeaway:** ML in the browser is becoming an increasingly attractive deployment option specifically for privacy-sensitive applications (since data never needs to leave the user's device or hit a server at all) and for applications that need to work reliably across an enormous, unpredictable diversity of end-user devices, without the deploying team needing to build and maintain a separate native app for every platform.
+
+---
+
+## Putting It Together: Deploying a Real-Time Personalization System
+
+Here's how the concepts in this article come together in a realistic project — a streaming video platform deploying a "what to watch next" personalization system:
+
+1. **Dispelling the myths upfront:** The team plans from the start for multiple coexisting models (a content-based recommender, a trending-content model, a thumbnail selection model) rather than a single model, and budgets ongoing engineering time for monitoring and frequent retraining rather than treating deployment as a one-time event.
+2. **Batch + online hybrid:** The bulk of personalized recommendations are computed in a nightly batch job and cached, since most users' core taste profiles don't shift dramatically hour to hour. But a lightweight online re-ranking model runs synchronously at request time, incorporating what the user has watched or clicked in just the current session, to keep recommendations feeling responsive and current.
+3. **Pipeline unification:** To avoid training-serving skew between the nightly batch features and the real-time session features, the team builds both feature pipelines on top of Apache Flink, ensuring the "same" features are computed identically whether they're being generated for a historical training run or a live request.
+4. **Compression for mobile:** The team discovers the online re-ranking model is too slow on lower-end mobile devices. They apply 8-bit quantization first (since it's the fastest, lowest-effort option), which cuts inference latency enough to hit their target, without the larger investment of knowledge distillation that more aggressive compression would have required.
+5. **Cloud vs. edge decision:** The heavy nightly batch computation stays entirely in the cloud, where compute is elastic and there's no tight latency constraint. The lightweight online re-ranking model, after compression, is deployed directly to the user's device (mobile app or browser via WASM) specifically to eliminate network round-trip latency and keep recent viewing behavior from leaving the device, addressing both a latency concern and a privacy concern simultaneously.
+
+Notice that, once again, very little of this final stage is about the model's architecture itself — it's almost entirely about the surrounding engineering decisions: when predictions get computed, how pipelines stay consistent, how much the model needs to shrink, and where the computation physically happens.
+
+---
+
+## Key Takeaways
+
+- Deployment is far more involved than newcomers expect: production applications typically run many models simultaneously, those models silently degrade over time even without code changes, update frequency is a deliberate strategic choice (sometimes measured in minutes, not months), and scalability is a concern from day one, not an afterthought.
+- Online prediction serves requests synchronously in real time and is necessary when inputs can't be known in advance; batch prediction precomputes results ahead of time and trades some freshness for dramatically simpler serving infrastructure — many real systems blend both.
+- Unifying batch and streaming feature pipelines (often via tools like Apache Flink) is an increasingly important strategy for preventing training-serving skew, a recurring theme throughout this series.
+- When a model is too slow or too large to deploy as-is, model compression techniques — low-rank factorization, knowledge distillation, pruning, and quantization — trade a typically small amount of accuracy for substantial gains in speed and size; quantization is often the simplest, highest-leverage place to start.
+- Cloud deployment is easier to manage but introduces network latency, ongoing cost, and privacy exposure; edge deployment (devices, browsers via WASM) solves those problems but requires the model to fit within real, often tight, device resource constraints — making compression and hardware-aware compilation essential parts of the deployment pipeline, not optional extras.
+
+---
+
+## What's Next
+
+In Article 8, we move from deployment to **monitoring and continual learning** — how teams detect that a deployed model is degrading, the different types of drift that cause performance to decay, and how automated retraining pipelines keep models fresh without constant manual intervention.
+
+---
+
+*Machine Learning Systems Series | Article 7 of N*
+*Based on "Designing Machine Learning Systems" by Chip Huyen (O'Reilly, 2022)*

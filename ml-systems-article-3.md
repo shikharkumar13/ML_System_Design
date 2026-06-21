@@ -1,0 +1,275 @@
+# Machine Learning Systems
+## Article 3: Data Engineering for ML — The Unglamorous Work That Makes Everything Else Possible
+
+*This is the third article in the **Machine Learning Systems** series, based on "Designing Machine Learning Systems" by Chip Huyen. Articles 1 and 2 covered what an ML system is and how to scope and frame an ML problem. This article covers the stage that consumes more engineering time than any other: data.*
+
+---
+
+Ask any practicing ML engineer how they spend their week, and you'll hear some version of the same answer: *"Mostly fighting with data."*
+
+Not training models. Not tuning hyperparameters. Data — finding it, cleaning it, storing it, moving it, and making sure it arrives where it needs to be, in the right format, at the right time.
+
+This is the part of ML that courses skip almost entirely. You're handed a clean CSV and told to predict a column. In production, that CSV doesn't exist. You have to build the machinery that creates it — every day, reliably, at scale, from a dozen messy sources.
+
+This article walks through that machinery: where data comes from, how it's formatted and stored, how it's modeled, how it flows between systems, and how to decide between processing it in batches or in real time.
+
+---
+
+## Where Does Production Data Actually Come From?
+
+In a course, "the data" is a given. In production, data arrives from at least four distinct sources, each with its own quirks, failure modes, and trust level.
+
+### 1. User-Input Data
+
+This is data that a human typed, uploaded, clicked, or otherwise directly provided — names in a signup form, search queries, uploaded photos, product reviews.
+
+**The defining characteristic: it is malformatted, often.** Humans make typos. They leave fields blank. They enter "N/A" in a numeric field. They paste an entire paragraph into a field meant for a single word. They upload a screenshot where a PDF was requested.
+
+**Example:** An e-commerce search bar receives queries like "mens running shoes size 10," "MENS RUNNING SHOE'S SIZE-10," and "running shoe men 10." All three express the same intent, but a naive system treats them as three different inputs. Your data pipeline needs to normalize this — lowercasing, removing punctuation, handling typos — before it's usable.
+
+Because user-input data is the least trustworthy and the most error-prone, it requires the heaviest validation layer: schema checks, type checks, range checks, and often a separate sanitization step before it ever touches a model.
+
+### 2. System-Generated Data
+
+This is data your own systems produce as a byproduct of running — logs, error reports, and **user behavior tracking** (clicks, scroll depth, time on page, app opens).
+
+System-generated data is generally more structured and trustworthy than user-input data because it's produced by code, not humans. But it comes with its own challenge: **volume.** A single user session can generate hundreds of log lines and event records. At scale (millions of users), this becomes enormous — companies routinely generate terabytes of log data per day.
+
+**Example:** A recommendation system doesn't just need to know what a user clicked — it needs to know what was *shown* to them but not clicked (impressions), how long they hovered before clicking, what they viewed immediately after, and whether they returned later. All of this is system-generated behavioral data, and it's often the richest signal for training models, far richer than anything explicitly provided by the user.
+
+### 3. Internal Databases
+
+Most companies run on a constellation of internal databases — a CRM with customer records, an inventory system, a payments database, an HR system. These weren't designed for ML; they were designed to run the business.
+
+**The challenge:** these databases are optimized for the application that owns them, not for ML consumption. Pulling data from them for training often requires careful coordination with the team that owns that database, understanding their schema (which may be undocumented or have evolved over years), and being mindful not to overload a production database with heavy analytical queries.
+
+**A common anti-pattern:** A data scientist runs a large, unoptimized SQL query directly against the production payments database to pull training data — and accidentally slows down checkout for real customers during a traffic spike. This is exactly why OLTP and OLAP systems are kept separate (more on this below).
+
+### 4. Third-Party Data
+
+Some data simply doesn't exist inside your company — demographic data, credit bureau data, weather data, ad exchange bid data. Companies purchase this from external vendors or access it via public/commercial APIs.
+
+**Considerations unique to third-party data:**
+- **Reliability:** Is the vendor's data accurate and updated on a schedule you can depend on?
+- **Licensing and compliance:** Are you legally allowed to use this data for the purpose you intend? Many vendor contracts restrict downstream use.
+- **Schema stability:** Vendors change their data formats without much warning. A pipeline built against a vendor's API can silently break when they update a field name.
+- **Cost:** Third-party data is often priced per record or per API call, which means your data pipeline design directly affects your bill.
+
+**Practical takeaway:** Whenever you bring in a new data source — internal or external — the first engineering task isn't modeling, it's building a validation and monitoring layer around that source, because you don't control its quality and you need to know immediately if it changes or breaks.
+
+---
+
+## Data Formats: How You Store Data Changes Everything Downstream
+
+Once you have data, you need to decide how to serialize it — i.e., how to write it to disk or transmit it over a network. This decision has massive performance implications that most ML practitioners never think about until they hit a wall.
+
+### Row-Major vs. Column-Major
+
+Imagine a table of a million transactions, each with 50 features (amount, merchant, location, timestamp, etc.).
+
+**Row-major formats** (like CSV) store data row by row — all 50 features of transaction 1, then all 50 features of transaction 2, and so on.
+
+- **Good for:** Writing new records (you just append a row). Accessing a complete sample (if you need *all* features of one specific transaction, they're stored together).
+- **Bad for:** Reading a single feature across all transactions. If you want just the "amount" column for all 1 million transactions, you have to read through every row and discard 49/50 columns of data you don't need.
+
+**Column-major formats** (like Parquet, ORC) store data column by column — all 1 million "amount" values together, then all 1 million "merchant" values together, and so on.
+
+- **Good for:** Reading specific features across a large dataset — exactly the access pattern used in feature engineering and training, where you often select a subset of columns from a massive dataset.
+- **Bad for:** Writing new individual records, since adding one new transaction means touching every column file.
+
+**Practical rule of thumb:**
+- Use **row-major** formats when your access pattern is "give me everything about one entity" — this is common in transactional, application-facing systems.
+- Use **column-major** formats when your access pattern is "give me one or two features across millions of entities" — this is the dominant pattern in ML training pipelines, which is why **Parquet has become the de facto standard format for ML training data** in the industry.
+
+### Text vs. Binary Formats
+
+**Text formats** (CSV, JSON) are human-readable. You can open them in a text editor and understand them immediately. This is valuable for debugging and for data exchange between systems with no shared schema agreement.
+
+**Binary formats** (Parquet, Avro, Protocol Buffers) are not human-readable but are dramatically more compact and faster to read/write, because they don't waste space encoding numbers as text characters and they often support compression natively.
+
+**Example of the difference:** Storing the number `1000000` as text in a CSV takes 7 bytes (one byte per character). Storing it as a binary integer takes 4 or 8 bytes regardless of how many digits it has, and binary formats apply compression schemes (like dictionary encoding for repeated strings) that text formats can't easily exploit.
+
+At the scale of terabytes of training data, this difference is not academic — it's the difference between a training job that takes 2 hours and one that takes 8, and between a storage bill of $500/month and $4,000/month.
+
+**Practical takeaway:** Use JSON/CSV for small-scale debugging, configuration, and human-facing data exchange. Use Parquet (or similar columnar binary formats) for anything that touches your training pipeline at scale.
+
+---
+
+## Data Models: How You Structure What You Store
+
+Beyond file format, you need to decide *how data is structured conceptually* — this is the data model, and it has a huge effect on what you can do efficiently later.
+
+### The Relational Model
+
+This is the model most people learn first: data lives in tables with strict schemas (each column has a defined type), and tables are **normalized** — broken into smaller, non-redundant tables linked by keys to avoid duplicating data.
+
+You query relational data with **SQL**, a declarative language where you describe *what* you want, not *how* to get it.
+
+**Strengths:** Strong consistency guarantees, mature tooling, excellent for structured, well-understood data like financial transactions or order records.
+
+**Weakness for ML:** Real-world ML data — user behavior logs, text, nested JSON from an API — often doesn't fit neatly into rigid tables. Forcing it into a relational schema can be slow to design and brittle to change.
+
+### NoSQL: Document and Graph Models
+
+**Document model:** Data is stored as flexible, often JSON-like documents. Each document can have a different structure — useful when your data doesn't have a uniform schema, or when the schema changes frequently.
+
+**Example:** A product catalog where some products have a "size" field, some have "weight," some have "battery life," and some have all three or none. Forcing this into a rigid relational table means either a sparse table full of nulls or constant schema migrations. A document store (like MongoDB) handles this naturally — each product document just contains whatever fields are relevant to it.
+
+**Graph model:** Data is stored as nodes (entities) and edges (relationships), and the model is optimized for traversing and querying those relationships.
+
+**Example:** A fraud detection system that needs to answer "is this new account connected to any account that was previously flagged for fraud, through shared devices, shared payment methods, or shared addresses?" This is a relationship-traversal problem, and graph databases (like Neo4j) are purpose-built for exactly this kind of query. Trying to answer it with multiple JOINs in a relational database becomes slow and unwieldy as the relationship chains get longer.
+
+### Structured vs. Unstructured: Data Warehouses vs. Data Lakes
+
+This distinction matters at the organizational scale.
+
+**Structured data** has a predefined schema — it fits into rows and columns cleanly. It's stored in a **data warehouse**, which enforces schema *before* data is written ("schema-on-write"). Data warehouses are optimized for fast, reliable analytical queries on clean data — think quarterly revenue reports, dashboards, and curated training datasets.
+
+**Unstructured data** — raw text, images, audio, video, free-form logs — doesn't fit a predefined schema. It's stored in a **data lake**, which takes a "schema-on-read" approach: dump the raw data in as-is, and figure out the structure when you actually query it.
+
+**Why this distinction matters for ML:** Most raw data an ML team collects — user-generated content, logs, sensor data — starts its life in a data lake because it's cheap to store and doesn't require upfront schema design. As that data gets cleaned, validated, and transformed into a usable, structured form for training, it often gets moved (or a derived version of it gets moved) into a data warehouse. This movement is exactly what ETL pipelines are for — which brings us to the next section.
+
+---
+
+## Storage Engines and Processing: OLTP vs. OLAP
+
+There are two fundamentally different jobs that a database can be asked to do, and conflating them is a classic mistake.
+
+### OLTP (Online Transaction Processing)
+
+OLTP systems are optimized to process individual transactions — a user placing an order, updating their profile, logging in — quickly and reliably, with high availability. Think of this as the database that runs *the application itself*.
+
+**Characteristics:**
+- Optimized for fast, small reads/writes of individual records
+- Strong consistency guarantees (when you place an order, it must be recorded correctly, immediately)
+- Examples: PostgreSQL, MySQL configured for application workloads
+
+### OLAP (Online Analytical Processing)
+
+OLAP systems are optimized for the opposite access pattern: aggregating and analyzing huge volumes of data — "what was our average order value by region last quarter?" These queries scan millions of rows and compute aggregates, which is exactly the kind of workload that would crush an OLTP system if you ran it there.
+
+**Characteristics:**
+- Optimized for large scans and aggregations across many records
+- Often column-major storage internally (connects back to the Parquet discussion above)
+- Examples: Snowflake, BigQuery, Redshift
+
+**Why this distinction is critical for ML engineers:** Training data preparation is fundamentally an OLAP workload — you're aggregating, joining, and transforming large volumes of historical data. Running this directly against an OLTP production database (as in the anti-pattern example earlier) is a recipe for taking down the application your company depends on. This is precisely why companies maintain separate OLAP systems (often fed by ETL pipelines from the OLTP systems) for analytics and ML workloads.
+
+### ETL: Extract, Transform, Load
+
+ETL is the standard pattern for moving data from messy raw sources into a clean, usable destination — and it's the backbone of most production data pipelines.
+
+- **Extract:** Pull raw data from source systems (the OLTP database, logs, third-party APIs).
+- **Transform:** Clean, validate, deduplicate, join, and reshape the data into a usable structure. This is where most of the actual engineering effort goes — handling nulls, fixing types, joining tables, computing derived fields.
+- **Load:** Write the transformed data into its destination (a data warehouse, a feature store).
+
+**Example pipeline for a churn prediction model:**
+1. **Extract** raw subscription events from the OLTP billing database, raw support ticket data from the CRM, and raw login events from application logs.
+2. **Transform:** Join these three sources on customer ID, compute derived features (days since last login, number of support tickets in the last 30 days, subscription tenure), handle missing values, and filter out test accounts.
+3. **Load** the resulting clean, feature-ready table into the data warehouse, where the training pipeline picks it up.
+
+A growing alternative pattern is **ELT** (Extract, Load, Transform) — load raw data into the warehouse first, then transform it using the warehouse's own compute power. This has become popular with modern cloud warehouses (Snowflake, BigQuery) that have cheap, scalable compute, because it lets you keep the raw data around and re-transform it differently later without re-extracting from the source.
+
+---
+
+## Modes of Dataflow: How Data Moves Between Systems
+
+An ML system is rarely a single program — it's a collection of services (a data pipeline, a training job, a serving API, a monitoring dashboard) that need to exchange data with each other. There are three common patterns for this.
+
+### 1. Data Passed Through Databases
+
+The simplest approach: one process writes data to a shared database, and another process reads it from there.
+
+**Limitation:** This requires both processes to have access to the same database, and it's often too slow for scenarios where a response is needed immediately. A consumer-facing app waiting on a database write-then-read cycle to get a recommendation will feel laggy. This pattern works well for offline, asynchronous communication (e.g., a batch job writing features that a training job reads hours later) but breaks down for real-time, user-facing interactions.
+
+### 2. Synchronous, Request-Driven Communication (REST and RPC)
+
+In this pattern, one service directly calls another and waits for a response — like a client calling a server and blocking until it replies.
+
+- **REST (Representational State Transfer):** The dominant pattern for web APIs. A client sends an HTTP request to an endpoint and gets a response, typically in JSON.
+- **RPC (Remote Procedure Call):** A service calls a function on another service as if it were a local function call. Tools like **gRPC** are common in ML serving infrastructure because they're more efficient than REST/JSON for high-throughput, low-latency internal communication between microservices.
+
+**Example:** When a user opens an app and the recommendation service needs a real-time prediction, the application backend makes a synchronous RPC call to the model-serving service, which returns a prediction within milliseconds. This is a request-driven pattern — tightly coupled, but fast.
+
+**Limitation:** The services are *coupled* in time — if the model-serving service is slow or down, the calling service is blocked or fails too. This also doesn't scale well when many different services need the same piece of data; you'd need each of them to make a separate request.
+
+### 3. Asynchronous, Event-Driven Communication
+
+Instead of services calling each other directly, they communicate by publishing and subscribing to **events** through a message broker — tools like **Apache Kafka** or **RabbitMQ**.
+
+A service that has new information ("a user just completed a purchase") publishes an event to a topic. Any number of other services can subscribe to that topic and react independently, without the publisher needing to know who's listening or waiting for a response.
+
+**Why this matters for ML systems:** This pattern decouples producers and consumers in both time and structure. The fraud detection model, the recommendation system's feature pipeline, and the analytics dashboard can all subscribe to the same "purchase completed" event stream independently, each processing it in their own way, without the purchase service needing to know any of them exist.
+
+**Example:** An e-commerce platform publishes a "purchase_completed" event to Kafka every time an order is placed. A fraud-scoring service consumes this event in real time to check for suspicious patterns. A separate feature pipeline consumes the same event to update a "user's recent purchase count" feature used by the recommendation model. A third service consumes it to update inventory counts. None of these consumers block each other, and the purchase service doesn't need to know they exist.
+
+**Practical takeaway:** Event-driven architectures are how most large-scale, real-time ML systems are actually wired together — they allow many independent components (some ML-related, some not) to react to the same underlying business events without tight coupling or bottlenecks.
+
+---
+
+## Batch Processing vs. Stream Processing: Static Features vs. Dynamic Features
+
+This is one of the most consequential architectural decisions in any ML system, because it directly determines what kind of features your model can use.
+
+### Batch Processing
+
+Batch processing runs on a fixed schedule (hourly, daily, weekly) over a large, fixed chunk of historical data. It computes **static features** — values that don't need to be up-to-the-second fresh.
+
+**Example:** "Average order value over the last 90 days" can be computed once a day in a batch job. It doesn't materially change minute to minute, and recomputing it for every prediction request would be wasteful.
+
+**Tools:** Apache Spark, Hadoop MapReduce, and modern batch-oriented warehouses are the classic tools here.
+
+### Stream Processing
+
+Stream processing computes features continuously, as new data arrives in real time, generating **dynamic features** that reflect the current moment.
+
+**Example:** "Number of failed login attempts in the last 5 minutes" is a feature that's only useful if it's fresh. A batch job that updates once a day would miss an account-takeover attack happening right now. This needs to be computed from a live event stream as login attempts occur.
+
+**Tools:** Apache Flink, Apache Spark Streaming, and Kafka Streams are common here, often consuming directly from the event streams described in the previous section.
+
+### Why Complex ML Systems Need Both
+
+Most production ML systems aren't purely batch or purely stream — they combine both, because real predictions often need a mix of static, slow-changing context and fresh, fast-changing signals.
+
+**Example — a real-time fraud detection model:**
+- **Batch features** (computed daily): the customer's average transaction amount over the last 6 months, their historical chargeback rate, their account age.
+- **Streaming features** (computed in real time): the number of transactions in the last 60 seconds, whether this transaction's location is unusually far from the previous one, whether the card was just used at a different merchant moments ago.
+
+At prediction time, the model combines both — pulling the static features from a feature store and computing the dynamic features on the fly from the live event stream — to make a single, accurate, real-time fraud decision.
+
+**The engineering challenge this creates — training-serving skew:** If your batch pipeline computes a feature one way (say, in Python using Pandas) and your streaming pipeline computes the "same" feature a different way (say, in Java using Flink) for production serving, the two implementations can subtly diverge. The model was trained on the batch version but served with the streaming version — and the resulting mismatch is one of the most common and hardest-to-debug sources of production model failures. This is precisely why **feature stores** (which aim to provide a single definition of a feature, computed consistently for both training and serving) have become a standard piece of MLOps infrastructure in recent years.
+
+---
+
+## Putting It Together: A Realistic Data Architecture
+
+Here's what the data architecture for a mid-size company's recommendation system might actually look like, tying together everything above:
+
+1. **Sources:** User clicks and views (system-generated), purchase history (internal OLTP database), demographic data (third-party vendor).
+2. **Ingestion:** Click and view events are published to **Kafka** as they happen. Purchase data is extracted nightly from the OLTP database via an **ETL** job.
+3. **Storage:** Raw events land in a **data lake** (cheap, schema-on-read). Cleaned, transformed data is loaded into a **data warehouse** in **Parquet** format for efficient analytical access.
+4. **Batch processing:** A nightly **Spark** job computes static features — "user's average session length over 30 days," "category affinity score" — and writes them to a feature store.
+5. **Stream processing:** A **Flink** job consumes the Kafka click stream in real time to compute dynamic features — "items viewed in this session," "time since last click."
+6. **Serving:** When a user opens the app, the recommendation service makes a synchronous **gRPC** call to the model server, which pulls static features from the feature store and combines them with real-time streaming features to generate a prediction in milliseconds.
+7. **Monitoring:** A separate consumer of the same Kafka stream feeds a dashboard tracking feature distributions, catching drift before it silently degrades the model.
+
+Notice that no single piece of this is "the model." The model is a small component sitting at the end of a long, carefully engineered data path — and that path is what most of an ML engineer's time actually goes into building and maintaining.
+
+---
+
+## Key Takeaways
+
+- Production data comes from messy, heterogeneous sources — user input, system logs, internal databases, and third-party vendors — each requiring different validation and trust levels.
+- File format matters at scale: row-major (CSV) for writing and full-record access, column-major (Parquet) for the feature-selection access pattern dominant in ML training, and binary formats over text formats whenever performance and cost matter.
+- Data models (relational, document, graph) and storage strategies (warehouse vs. lake) should match the structure and use case of your data — don't force everything into a rigid schema, and don't dump everything into an unstructured lake either.
+- Never run heavy analytical (OLAP) workloads against your production transactional (OLTP) database — this is how ML teams accidentally take down the product.
+- Dataflow patterns — database-mediated, synchronous request-driven (REST/RPC), and asynchronous event-driven (Kafka/RabbitMQ) — each suit different latency and coupling requirements. Event-driven architectures are the backbone of most real-time ML systems.
+- Batch processing produces static features; stream processing produces dynamic, real-time features. Most production systems need both, and reconciling them consistently (avoiding training-serving skew) is a core MLOps challenge that feature stores exist to solve.
+
+---
+
+## What's Next
+
+In Article 4, we move from raw data to **training data and labeling** — how to construct a training dataset that actually represents the problem, where labels come from, how to handle class imbalance, and the data leakage traps that quietly ruin more models than any algorithm choice ever could.
+
+---
