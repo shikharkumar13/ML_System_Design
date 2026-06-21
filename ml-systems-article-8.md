@@ -1,7 +1,5 @@
 # Machine Learning Systems
-## Article 8: Monitoring and Continual Learning — Catching the Failures Nobody Warns You About
-
-*This is the eighth article in the **Machine Learning Systems** series, based on "Designing Machine Learning Systems" by Chip Huyen. Article 7 covered how models get deployed. This article covers what happens after that — because deployment isn't the finish line, it's the start of an entirely new phase of the job.*
+## Article 8: Monitoring and Continual Learning - Catching the Failures Nobody Warns You About
 
 ---
 
@@ -196,6 +194,3 @@ Notice that almost every step here relies on infrastructure that had to be delib
 In Article 9, we move into **the human and organizational side of ML systems** — how to structure ML teams, the responsibilities split between data scientists, ML engineers, and platform/infrastructure engineers, and the broader question of how organizations build a genuinely sustainable, mature ML practice rather than a collection of one-off model projects.
 
 ---
-
-*Machine Learning Systems Series | Article 8 of N*
-*Based on "Designing Machine Learning Systems" by Chip Huyen (O'Reilly, 2022)*
