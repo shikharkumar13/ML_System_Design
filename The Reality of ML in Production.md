@@ -1,5 +1,5 @@
 # Machine Learning Systems
-## Article 1: The Reality of ML in Production — What They Don't Teach You in Courses
+## Article 1: The Reality of ML in Production - What They Don't Teach You in Courses
 
 *This is the first article in the **Machine Learning Systems** series, based on "Designing Machine Learning Systems" by Chip Huyen. This series is for practitioners who have built ML models and want to understand what happens when those models meet the real world.*
 
@@ -19,14 +19,14 @@ When most people hear "machine learning system," they picture the algorithm — 
 
 A production ML system is an ecosystem with many interacting components:
 
-- **Business requirements** — what problem are we actually solving, and how do we measure success?
-- **Data infrastructure** — pipelines to collect, store, clean, and version data
-- **Feature engineering** — transforming raw data into inputs the model can use
-- **The model itself** — training, evaluation, and selection
-- **Serving infrastructure** — getting predictions to users reliably and quickly
-- **Monitoring and observability** — detecting when the model degrades or fails
-- **Feedback loops** — capturing signals to retrain and improve the model over time
-- **Human-in-the-loop workflows** — cases where a human must review model decisions
+- **Business requirements** - what problem are we actually solving, and how do we measure success?
+- **Data infrastructure** - pipelines to collect, store, clean, and version data
+- **Feature engineering** - transforming raw data into inputs the model can use
+- **The model itself** - training, evaluation, and selection
+- **Serving infrastructure** - getting predictions to users reliably and quickly
+- **Monitoring and observability** - detecting when the model degrades or fails
+- **Feedback loops** - capturing signals to retrain and improve the model over time
+- **Human-in-the-loop workflows** - cases where a human must review model decisions
 
 Think of the model as the engine in a car. It's critical, but without the chassis, wheels, fuel system, dashboard, and brakes, the engine alone goes nowhere. A practicing ML engineer spends far more time building and maintaining that surrounding infrastructure than tuning the model itself.
 
@@ -34,7 +34,7 @@ Think of the model as the engine in a car. It's critical, but without the chassi
 
 ## Point 1: Knowing When to Use Machine Learning
 
-Machine learning is not a Swiss army knife. It is a powerful but specific tool — one that learns complex patterns from existing data to make predictions on new, unseen data.
+Machine learning is not a Swiss army knife. It is a powerful but specific tool - one that learns complex patterns from existing data to make predictions on new, unseen data.
 
 **The core insight:** Use ML when the rules are too complex, too numerous, or too dynamic to write by hand.
 
