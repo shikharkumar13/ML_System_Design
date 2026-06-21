@@ -1,7 +1,5 @@
 # Machine Learning Systems
-## Article 2: How ML Systems Are Actually Built — From Business Goals to Deployment
-
-*This is the second article in the **Machine Learning Systems** series, based on "Designing Machine Learning Systems" by Chip Huyen. If you haven't read Article 1, start there — it covers what an ML system actually is and why production ML is a fundamentally different world from research.*
+## Article 2: How ML Systems Are Actually Built - From Business Goals to Deployment
 
 ---
 
